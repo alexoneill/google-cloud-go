@@ -1164,6 +1164,19 @@ func TestIntegration_Admin(t *testing.T) {
 	if gotRowCount != 5 {
 		t.Errorf("Invalid row count after dropping range: got %v, want %v", gotRowCount, 5)
 	}
+
+  // Verify that the IAM Controls work for Tables.
+  iamHandle := adminClient.TableIAM("mytable")
+  p, err := iamHandle.Policy(ctx)
+  if err != nil {
+		t.Errorf("Iam GetPolicy mytable: %v", err)
+  }
+  if err = iamHandle.SetPolicy(ctx, p); err != nil {
+		t.Errorf("Iam SetPolicy mytable: %v", err)
+  }
+  if _, err = iamHandle.TestPermissions(ctx, []string{"bigtable.tables.get"}); err != nil {
+		t.Errorf("Iam TestPermissions mytable: %v", err)
+  }
 }
 
 func TestIntegration_AdminCreateInstance(t *testing.T) {
