@@ -41,6 +41,9 @@ import (
 type TableAPI interface {
 	ReadRow(ctx context.Context, req *btpb.SessionReadRowRequest) (*btpb.SessionReadRowResponse, error)
 	MutateRow(ctx context.Context, req *btpb.SessionMutateRowRequest) (*btpb.SessionMutateRowResponse, error)
+	CheckAndMutateRow(ctx context.Context, req *btpb.SessionCheckAndMutateRowRequest) (*btpb.SessionCheckAndMutateRowResponse, error)
+	ReadModifyWriteRow(ctx context.Context, req *btpb.SessionReadModifyWriteRowRequest) (*btpb.SessionReadModifyWriteRowResponse, error)
+	MutateRows(ctx context.Context, req *btpb.SessionMutateRowsRequest) (*btpb.SessionMutateRowsResponse, error)
 
 	// Close releases this resource's underlying read + write session
 	// pools from the sessionClient's per-resource keyed map. Idempotent.

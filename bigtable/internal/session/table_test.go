@@ -694,3 +694,98 @@ func TestSessionTable_Close_BeforeLazyOpen_EarlyBail(t *testing.T) {
 		t.Errorf("release called %d times, want 1 (Close's own release only; guardOpen never entered inner)", releaseCalls.Load())
 	}
 }
+
+func TestSessionTableCheckAndMutateRow_NonIdempotentDoesNotRetryTransportFailure(t *testing.T) {
+	transportErr := btransport.TagErr(btransport.StateTransportFailure, status.Error(codes.Unavailable, "wire error"))
+	inv := &fakeInvoker{errBefore: 1000, err: transportErr}
+	tbl, _ := newTestTable(t, nil, inv)
+
+	_, err := tbl.CheckAndMutateRow(context.Background(), &btpb.SessionCheckAndMutateRowRequest{
+		Key:           []byte("row1"),
+		TrueMutations: []*btpb.Mutation{mutationSetCell(1_000_000)},
+	})
+	if err == nil {
+		t.Fatal("CheckAndMutateRow returned nil; want error")
+	}
+	if got := inv.callCount(); got != 1 {
+		t.Errorf("invoker calls = %d, want 1 (CheckAndMutateRow is non-idempotent)", got)
+	}
+}
+
+func TestSessionTableReadModifyWriteRow_NonIdempotentDoesNotRetryTransportFailure(t *testing.T) {
+	transportErr := btransport.TagErr(btransport.StateTransportFailure, status.Error(codes.Unavailable, "wire error"))
+	inv := &fakeInvoker{errBefore: 1000, err: transportErr}
+	tbl, _ := newTestTable(t, nil, inv)
+
+	_, err := tbl.ReadModifyWriteRow(context.Background(), &btpb.SessionReadModifyWriteRowRequest{
+		Key: []byte("row1"),
+		Rules: []*btpb.ReadModifyWriteRule{
+			{FamilyName: "cf", ColumnQualifier: []byte("q"), Rule: &btpb.ReadModifyWriteRule_IncrementAmount{IncrementAmount: 1}},
+		},
+	})
+	if err == nil {
+		t.Fatal("ReadModifyWriteRow returned nil; want error")
+	}
+	if got := inv.callCount(); got != 1 {
+		t.Errorf("invoker calls = %d, want 1 (ReadModifyWriteRow is non-idempotent)", got)
+	}
+}
+
+func TestSessionTableMutateRows_IdempotencyFlowsToRetry(t *testing.T) {
+	const serverTime int64 = -1
+	transportErr := btransport.TagErr(btransport.StateTransportFailure, status.Error(codes.Unavailable, "wire error"))
+
+	cases := []struct {
+		name           string
+		entries        []*btpb.SessionMutateRowsRequest_Entry
+		wantAttemptCap int
+	}{
+		{
+			name: "all_explicit_timestamps_idempotent_retries_full_budget",
+			entries: []*btpb.SessionMutateRowsRequest_Entry{
+				{Key: []byte("r1"), Mutations: []*btpb.Mutation{mutationSetCell(1_000_000)}},
+				{Key: []byte("r2"), Mutations: []*btpb.Mutation{mutationSetCell(2_000_000)}},
+			},
+			wantAttemptCap: 3,
+		},
+		{
+			name: "one_server_time_entry_non_idempotent_stops_at_one_attempt",
+			entries: []*btpb.SessionMutateRowsRequest_Entry{
+				{Key: []byte("r1"), Mutations: []*btpb.Mutation{mutationSetCell(1_000_000)}},
+				{Key: []byte("r2"), Mutations: []*btpb.Mutation{mutationSetCell(serverTime)}},
+			},
+			wantAttemptCap: 1,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			inv := &fakeInvoker{errBefore: 1000, err: transportErr}
+			tbl, _ := newTestTable(t, nil, inv)
+
+			_, err := tbl.MutateRows(context.Background(), &btpb.SessionMutateRowsRequest{
+				Entries: tc.entries,
+			})
+			if err == nil {
+				t.Fatal("MutateRows returned nil; want error")
+			}
+			if got := inv.callCount(); got != tc.wantAttemptCap {
+				t.Errorf("invoker calls = %d, want %d", got, tc.wantAttemptCap)
+			}
+		})
+	}
+}
+
+func TestSessionTable_MatView_WriteVRpcsReturnErrWriteNotSupported(t *testing.T) {
+	readInv := &fakeInvoker{result: btransport.InvokeResult{Response: &btpb.SessionReadRowResponse{}}}
+	tbl, _ := newTestTable(t, readInv, nil)
+
+	if _, err := tbl.CheckAndMutateRow(context.Background(), &btpb.SessionCheckAndMutateRowRequest{Key: []byte("r1")}); err != ErrWriteNotSupported {
+		t.Errorf("CheckAndMutateRow on MatView = %v, want ErrWriteNotSupported", err)
+	}
+	if _, err := tbl.ReadModifyWriteRow(context.Background(), &btpb.SessionReadModifyWriteRowRequest{Key: []byte("r1")}); err != ErrWriteNotSupported {
+		t.Errorf("ReadModifyWriteRow on MatView = %v, want ErrWriteNotSupported", err)
+	}
+	if _, err := tbl.MutateRows(context.Background(), &btpb.SessionMutateRowsRequest{}); err != ErrWriteNotSupported {
+		t.Errorf("MutateRows on MatView = %v, want ErrWriteNotSupported", err)
+	}
+}
